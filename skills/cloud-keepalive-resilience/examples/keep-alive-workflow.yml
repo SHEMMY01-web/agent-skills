@@ -1,0 +1,96 @@
+name: Cloud Keep-Alive (Backend + Database)
+
+on:
+  schedule:
+    # Run every 14 minutes to prevent 15-minute idle container spin-down & keep DB awake
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    name: Ping Cloud Services
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Backend Service (/health or /api/ping-db)
+        env:
+          SERVICE_URL: ${{ secrets.BACKEND_SERVICE_URL }}
+        run: |
+          MAX_RETRIES=4
+          RETRY_DELAY=10
+          SUCCESS=false
+
+          echo "📡 Pinging service at: $SERVICE_URL"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "--- Attempt $i of $MAX_RETRIES ---"
+            HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+              --connect-timeout 10 \
+              --max-time 60 \
+              "$SERVICE_URL" || echo -e "\nfailed")
+
+            STATUS_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
+            BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+
+            echo "HTTP Status Code: $STATUS_CODE"
+            if [ -n "$BODY" ]; then
+              echo "Response Snippet: $(echo "$BODY" | head -c 250)"
+            fi
+
+            if [ "$STATUS_CODE" -ge 200 ] && [ "$STATUS_CODE" -lt 300 ]; then
+              echo "✅ Success! Service responded with HTTP $STATUS_CODE. Container is warm and active."
+              SUCCESS=true
+              break
+            fi
+
+            if [ "$i" -lt "$MAX_RETRIES" ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s for container cold-start..."
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          if [ "$SUCCESS" = false ]; then
+            echo "⚠️ Backend service did not return 2xx within $MAX_RETRIES attempts (may still be booting)."
+          fi
+
+      - name: Direct Supabase Database Fallback Probe
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_ANON_KEY }}
+        run: |
+          MAX_RETRIES=4
+          RETRY_DELAY=8
+          SUCCESS=false
+
+          echo "🗄️ Sending direct REST ping to Supabase: $SUPABASE_URL"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "--- Attempt $i of $MAX_RETRIES ---"
+            HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -H "apikey: $SUPABASE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_KEY" \
+              "$SUPABASE_URL/rest/v1/items?select=id&limit=1" || echo -e "\nfailed")
+
+            STATUS_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
+            BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+
+            echo "HTTP Status Code: $STATUS_CODE"
+            if [ -n "$BODY" ]; then
+              echo "Response Snippet: $(echo "$BODY" | head -c 250)"
+            fi
+
+            if [ "$STATUS_CODE" -ge 200 ] && [ "$STATUS_CODE" -lt 300 ]; then
+              echo "✅ Success! Supabase database responded with HTTP $STATUS_CODE. Project is warm and active."
+              SUCCESS=true
+              break
+            fi
+
+            if [ "$i" -lt "$MAX_RETRIES" ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s for Supabase to wake up before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          if [ "$SUCCESS" = false ]; then
+            echo "❌ Error: Failed to ping Supabase after $MAX_RETRIES attempts."
+            exit 1
+          fi
