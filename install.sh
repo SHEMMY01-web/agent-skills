@@ -11,9 +11,9 @@ SKILLS_DIR="${SCRIPT_DIR}/skills"
 GLOBAL_TARGET="${HOME}/.gemini/config/skills"
 
 print_header() {
-  echo "=================================================="
-  echo "         🤖 AGENT SKILLS INSTALLER                "
-  echo "=================================================="
+  echo "================================================================================"
+  echo "                        🤖 AGENT SKILLS REPOSITORY                              "
+  echo "================================================================================"
 }
 
 print_help() {
@@ -33,23 +33,45 @@ print_help() {
   echo "  ./install.sh --link-global"
   echo "  ./install.sh --project /home/user/my-web-app"
   echo "  ./install.sh --list"
-  echo "=================================================="
+  echo "================================================================================"
 }
 
 list_skills() {
   echo "Available skills in repository:"
-  echo "--------------------------------------------------"
-  for skill_path in "${SKILLS_DIR}"/*; do
-    if [ -d "${skill_path}" ] && [ "$(basename "${skill_path}")" != "_template" ]; then
-      skill_name="$(basename "${skill_path}")"
-      desc=""
-      if [ -f "${skill_path}/SKILL.md" ]; then
-        desc="$(grep -m 1 '^description:' "${skill_path}/SKILL.md" | sed 's/description:[ >-]*//' | tr -d '\r')"
-      fi
-      printf "  • \033[1;34m%-30s\033[0m %s\n" "${skill_name}" "${desc:-No description}"
-    fi
-  done
-  echo "--------------------------------------------------"
+  echo "--------------------------------------------------------------------------------"
+  python3 -c '
+import os
+
+base = "'"${SKILLS_DIR}"'"
+for item in sorted(os.listdir(base)):
+    if item.startswith("_"):
+        continue
+    p = os.path.join(base, item, "SKILL.md")
+    if os.path.exists(p):
+        with open(p) as f:
+            content = f.read()
+        desc = ""
+        if content.startswith("---"):
+            lines = content.split("---")[1].strip().split("\n")
+            in_desc = False
+            desc_lines = []
+            for line in lines:
+                if line.startswith("description:"):
+                    in_desc = True
+                    val = line.split("description:", 1)[1].strip(" >-")
+                    if val:
+                        desc_lines.append(val)
+                elif in_desc:
+                    if line.startswith(" ") or line.startswith("\t"):
+                        desc_lines.append(line.strip())
+                    else:
+                        break
+            desc = " ".join(desc_lines)
+        print(f"  \033[1;36m• {item:<34}\033[0m")
+        if desc:
+            print(f"    \033[0;37m{desc}\033[0m\n")
+'
+  echo "--------------------------------------------------------------------------------"
 }
 
 install_copy() {
