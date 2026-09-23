@@ -1,339 +1,123 @@
 ---
 name: spa-deployment-cache-resilience
 description: >-
-  Single Page Application (SPA) deployment cache resilience, dynamic chunk preload failure recovery,
-  Service Worker HTML cache-poisoning prevention, and negative-lookahead SPA routing for Vite, React Router,
-  Vercel, and PWA environments. Distilled from real-world post-deployment chunk mismatch and CSS preload error
-  troubleshooting. Use when debugging "Unable to preload CSS", "Failed to fetch dynamically imported module",
-  "Unexpected token <", ErrorBoundary crashes on first load requiring Ctrl+Shift+R, or configuring zero-downtime SPA caching.
+  Single Page Application (SPA) deployment cache resilience, dynamic chunk preload
+  failure recovery, Service Worker HTML cache-poisoning prevention, and negative-lookahead
+  SPA routing for Vite, React Router, Vercel, and PWA environments. Distilled from real-world
+  post-deployment chunk mismatch and CSS preload error troubleshooting. Use when debugging
+  "Unable to preload CSS", "Failed to fetch dynamically imported module", "Unexpected token <",
+  ErrorBoundary crashes on first load requiring Ctrl+Shift+R, or configuring zero-downtime SPA caching.
 ---
 
-# SPA Deployment Cache Resilience & Preload Failure Recovery
+# SPA Deployment Cache Resilience & Chunk Recovery
 
-A battle-tested architecture and runbook for eliminating post-deployment chunk mismatches, Service Worker cache poisoning, dynamic CSS preload rejections, and SPA rewrite collisions across React, Vite, and modern cloud hosting environments (Vercel, Netlify, Cloudflare Pages, Nginx).
-
----
-
-## 1. When to Activate This Skill
-- **Symptom 1:** Users encounter `Error: Unable to preload CSS for /assets/...` on initial load or route transition.
-- **Symptom 2:** Users see an `ErrorBoundary` crash ("Something went wrong") on the first visit after a release, but pressing `Ctrl + Shift + R` makes the website load normally.
-- **Symptom 3:** Browser console reports `SyntaxError: Unexpected token '<'` or `TypeError: Failed to fetch dynamically imported module`.
-- **Symptom 4:** Service Worker serves outdated or corrupt assets, forcing clients into inconsistent application states.
-- **Symptom 5:** Configuring SPA routing rewrites on Vercel, Netlify, or Nginx to ensure missing static assets return `404 Not Found` rather than `200 OK (text/html)`.
+A definitive runbook for diagnosing and eliminating post-deployment asset caching bugs, "white screens of death", missing icons, and stale Service Worker chunk mismatches in Single Page Applications (Vite, React, Vercel, Netlify).
 
 ---
 
-## 2. Anatomy of the Failure Chain
+## 1. The Root Cause: Why Icons/Chunks Fail Until "Ctrl + Shift + R"
 
-In single-page applications deployed with content-hashed bundles and Service Workers, a naive configuration creates a compounding failure cycle:
+When modern web apps are built, bundlers generate content-hashed filenames for JavaScript and CSS chunks (e.g. `index-D8IlDZVV.js`, `icons-vendor-CwF3K6zW.js`).
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 1. New Production Deployment occurs (Vite emits new hashed chunks)              │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 2. Client requests an obsolete asset (e.g. /assets/landing-OLD.css)             │
-│    (From cached index.html or an active user session)                          │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 3. Catch-all SPA rewrite (/(.*) -> /index.html) intercepts missing asset        │
-│    Server returns HTTP 200 OK with HTML content (<!doctype html>)               │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 4. Service Worker caches HTML response under the .css or .js URL                │
-│    CacheStorage is now permanently POISONED for that asset                      │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 5. Browser inspects response: MIME is text/html, but script/style was expected  │
-│    X-Content-Type-Options: nosniff blocks execution                             │
-│    Vite preload helper fires <link>.onerror -> throws "Unable to preload CSS"   │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 6. React Suspense fails -> ErrorBoundary catches error -> App crashes           │
-│    Normal reload reuses poisoned SW cache! (Only Ctrl+Shift+R bypasses SW)      │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+When a new version is deployed to hosting platforms (Vercel, Cloudflare, Netlify, S3/CloudFront):
+1. **The Stale HTML Trap:** The user's browser or service worker serves a cached `index.html` from the previous deployment because `index.html` lacked `Cache-Control: max-age=0, must-revalidate`.
+2. **The Catch-All Rewrite Trap:** The stale `index.html` requests the old chunk hash (`icons-vendor-OLD.js`). Because the host's SPA routing rule rewrites `/(.*)` to `/index.html`, the server returns HTTP 200 with HTML text (`<!doctype html>...`) instead of returning a 404 or JavaScript!
+3. **The MIME / Syntax Crash:** The browser attempts to execute the HTML response as JavaScript and throws `SyntaxError: Unexpected token '<'` or `Failed to fetch dynamically imported module`. The icon chunk fails to load, and icons across the entire UI fail to render!
+4. **Why Hard Refresh (Ctrl + Shift + R) "Fixes" It:** Ctrl + Shift + R forces the browser to bypass all caches, fetch the latest `index.html`, and request the current chunk hashes.
 
 ---
 
-## 3. The 5-Layer Defense Architecture
+## 2. Core Guidelines & Best Practices
 
-To achieve zero-downtime client deployments that never require users to perform hard refreshes, apply all 5 layers:
+### 1. Strict Cache-Control Headers in Hosting Configuration
+Never allow browsers or CDNs to cache `index.html` or Service Worker scripts:
+- `index.html`, `sw.js`, `registerSW.js` -> `Cache-Control: public, max-age=0, must-revalidate`
+- `/assets/*` (hashed files) -> `Cache-Control: public, max-age=31536000, immutable`
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│ Layer 1: Unified CSS Bundling (vite.config.js: cssCodeSplit: false)     │
-│ -> Eliminates dynamic <link> preloads; all styles load with HTML shell │
-├────────────────────────────────────────────────────────────────────────┤
-│ Layer 2: Negative-Lookahead SPA Rewrites (vercel.json / netlify.toml)  │
-│ -> Missing /assets/* return 404, never 200 HTML                        │
-├────────────────────────────────────────────────────────────────────────┤
-│ Layer 3: Service Worker MIME-Aware Cache Guard (sw.js)                 │
-│ -> Never cache text/html for code assets; purge corrupt entries        │
-├────────────────────────────────────────────────────────────────────────┤
-│ Layer 4: Vite Dynamic Preload Auto-Recovery (main.jsx)                 │
-│ -> vite:preloadError event handler throttles and reloads safely        │
-├────────────────────────────────────────────────────────────────────────┤
-│ Layer 5: ErrorBoundary Self-Healing (ErrorBoundary.jsx)                │
-│ -> Purges CacheStorage on chunk errors and user reload clicks          │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 4. Implementation Runbook & Code Reference
-
-### 4.1 Layer 1: Unified CSS Bundling in Vite
-By default, Vite splits CSS per lazy-loaded route (`cssCodeSplit: true`). When dynamic imports are invoked, Vite injects dynamic `<link rel="stylesheet">` elements via JavaScript. If an asset is missing or blocked, Vite throws an unhandled rejection.
-
-For applications with small-to-medium total CSS bundles (< 200KB), disabling `cssCodeSplit` combines all CSS into a single static file included in `<head>`:
-
-```javascript
-// vite.config.js
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-
-export default defineConfig({
-  plugins: [react()],
-  build: {
-    // Bundle all component styles into a single static stylesheet
-    // Eliminates dynamic runtime CSS preloading and associated network crashes
-    cssCodeSplit: false,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          "vendor-react": ["react", "react-dom", "react-router-dom"],
-        },
-      },
-    },
-  },
-});
-```
-
-### 4.2 Layer 2: Negative-Lookahead SPA Hosting Rewrites
-Never rewrite static asset directories to `/index.html`. If an asset does not exist, the server **must** return `404 Not Found` so browser loaders and service workers recognize the failure immediately.
-
-#### Vercel Configuration (`vercel.json`)
+**Example: `vercel.json`**
 ```json
 {
   "headers": [
     {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "DENY" }
-      ]
-    }
-  ],
-  "rewrites": [
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    },
     {
-      "source": "/((?!assets/|IMAGES/|sw\\.js|manifest\\.webmanifest|favicon\\.ico).*)",
-      "destination": "/index.html"
+      "source": "/(sw\\.js|registerSW\\.js)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    },
+    {
+      "source": "/assets/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
     }
   ]
 }
 ```
 
-#### Netlify Configuration (`_redirects` / `netlify.toml`)
-```toml
-# netlify.toml
-[[redirects]]
-  from = "/assets/*"
-  to = "/assets/:splat"
-  status = 404
+### 2. Negative-Lookahead SPA Routing
+Prevent SPA rewrites from masking deleted chunks with `index.html`. If an asset does not exist, it MUST return a true 404 so error handlers can detect the version change:
+```json
+// ❌ FRAGILE: Rewrites deleted JS chunks to HTML
+{ "source": "/(.*)", "destination": "/index.html" }
 
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
+// ✅ RESILIENT: Negative-lookahead protects /assets/ and file extensions
+{ "source": "/((?!assets/|.*\\..*).*)", "destination": "/index.html" }
 ```
 
-#### Nginx Configuration (`nginx.conf`)
-```nginx
-location /assets/ {
-    try_files $uri =404;
-    expires 1y;
-    add_header Cache-Control "public, immutable";
-}
-
-location / {
-    try_files $uri $uri/ /index.html;
-}
-```
-
-### 4.3 Layer 3: Service Worker MIME-Aware Cache Storage
-In your Service Worker `sw.js`, add strict MIME type validation before saving network responses to cache. If a `.js` or `.css` request returns `text/html`, discard it immediately. If a poisoned entry already exists in cache, evict it.
-
+### 3. Automated Chunk Preload Error Recovery (Vite)
+Add automated reload listeners in `main.jsx` to seamlessly recover from deployment chunk mismatches without user intervention:
 ```javascript
-// sw.js
-const CACHE_VERSION = "v1.0.5";
-const STATIC_CACHE = `app-static-${CACHE_VERSION}`;
-
-/**
- * Stale-While-Revalidate with strict MIME-type guards
- */
-async function staleWhileRevalidate(request, cacheName) {
-  const cache = await caches.open(cacheName);
-  const cachedResponse = await cache.match(request);
-  const isCodeAsset = /\.(js|css)$/i.test(request.url);
-
-  // 1. Inspect existing cached response: purge if poisoned with HTML
-  if (cachedResponse) {
-    const cachedType = cachedResponse.headers.get("content-type") || "";
-    if (isCodeAsset && cachedType.includes("text/html")) {
-      await cache.delete(request);
-    } else {
-      // Revalidate in background without blocking render
-      fetch(request.clone())
-        .then((networkResponse) => {
-          if (networkResponse?.ok) {
-            const netType = networkResponse.headers.get("content-type") || "";
-            if (!isCodeAsset || !netType.includes("text/html")) {
-              cache.put(request, networkResponse.clone());
-            }
-          }
-        })
-        .catch(() => null);
-
-      return cachedResponse;
-    }
-  }
-
-  // 2. Fetch fresh from network with MIME verification
-  try {
-    const networkResponse = await fetch(request.clone());
-    if (networkResponse && networkResponse.ok) {
-      const netType = networkResponse.headers.get("content-type") || "";
-      // CRITICAL: Never cache text/html under a .js or .css URL
-      if (!isCodeAsset || !netType.includes("text/html")) {
-        cache.put(request, networkResponse.clone());
-      }
-    }
-    return networkResponse;
-  } catch (err) {
-    if (cachedResponse) return cachedResponse;
-    throw err;
-  }
-}
-```
-
-### 4.4 Layer 4: Global `vite:preloadError` Auto-Recovery
-Vite provides a dedicated window event, `vite:preloadError`, whenever dynamic import chunks fail to fetch. Intercept this event, call `event.preventDefault()` to stop the exception from bubbling to React, and execute a throttled reload to fetch the latest `index.html`.
-
-```javascript
-// src/main.jsx
-import React from "react";
-import ReactDOM from "react-dom/client";
-import App from "./App.jsx";
-
-// Intercept chunk loading errors caused by post-deployment hash changes
-window.addEventListener("vite:preloadError", (event) => {
-  console.warn("[Vite] Preload error detected:", event.payload);
-  event.preventDefault(); // Stop unhandled rejection from crashing ErrorBoundary
-
-  const lastReload = sessionStorage.getItem("vite_preload_retry");
+// Auto-recover from dynamic import / chunk preload mismatches
+window.addEventListener('vite:preloadError', (event) => {
+  console.warn('[Vite] Chunk preload mismatch. Auto-refreshing for latest deployment...', event);
+  const reloadKey = 'app_chunk_reload';
+  const lastReload = parseInt(sessionStorage.getItem(reloadKey) || '0', 10);
   const now = Date.now();
-  // Throttle reload to at most once per 10 seconds to prevent infinite reload loops
-  if (!lastReload || now - parseInt(lastReload, 10) > 10000) {
-    sessionStorage.setItem("vite_preload_retry", String(now));
+  if (now - lastReload > 8000) {
+    sessionStorage.setItem(reloadKey, now.toString());
     window.location.reload();
   }
 });
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+// Fallback for script MIME / syntax errors on stale chunk rewrites
+window.addEventListener('error', (event) => {
+  const isChunkError = 
+    event?.message?.includes('Failed to fetch dynamically imported module') ||
+    event?.message?.includes('Importing a module script failed') ||
+    event?.message?.includes("Unexpected token '<'");
+
+  if (isChunkError) {
+    const reloadKey = 'app_chunk_reload';
+    const lastReload = parseInt(sessionStorage.getItem(reloadKey) || '0', 10);
+    const now = Date.now();
+    if (now - lastReload > 8000) {
+      sessionStorage.setItem(reloadKey, now.toString());
+      window.location.reload();
+    }
+  }
+});
 ```
 
-### 4.5 Layer 5: ErrorBoundary Self-Healing & Cache Clearing
-Ensure the root `ErrorBoundary` automatically clears browser `CacheStorage` before reloading. Users clicking "Reload Page" must never be trapped in a stale cache loop.
-
-```jsx
-// src/components/ErrorBoundary.jsx
-import React from "react";
-
-export default class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false, error: null };
+### 4. PWA / Service Worker Tug-of-War Prevention
+- Never call `registration.unregister()` on `window.load` while simultaneously using a PWA plugin (`VitePWA`) that auto-registers service workers. This leaves orphaned caches in `CacheStorage`.
+- In `vite.config.js`, configure Workbox to purge old caches and activate immediately:
+  ```javascript
+  workbox: {
+    cleanupOutdatedCaches: true,
+    clientsClaim: true,
+    skipWaiting: true,
+    navigateFallback: '/index.html',
+    navigateFallbackDenylist: [/^\/api\//, /^\/assets\//]
   }
+  ```
 
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error, errorInfo) {
-    console.error("[ErrorBoundary] Caught error:", error, errorInfo);
-
-    // Auto-recover from stale chunks or preload errors after new releases
-    const isChunkOrPreloadError = error?.message && (
-      error.message.includes("dynamically imported module") ||
-      error.message.includes("Unable to preload") ||
-      error.message.includes("Unexpected token")
-    );
-
-    if (isChunkOrPreloadError) {
-      const lastRetry = sessionStorage.getItem("chunk_auto_retry");
-      const now = Date.now();
-      if (!lastRetry || now - parseInt(lastRetry, 10) > 15000) {
-        sessionStorage.setItem("chunk_auto_retry", String(now));
-        // Clear all caches and force clean reload
-        if ("caches" in window) {
-          caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))))
-            .finally(() => { window.location.reload(); });
-        } else {
-          window.location.reload();
-        }
-      }
-    }
-  }
-
-  handleReload = async () => {
-    this.setState({ hasError: false, error: null });
-    // Guarantee clean state for manual user reload
-    if ("caches" in window) {
-      try {
-        const keys = await caches.keys();
-        await Promise.all(keys.map(k => caches.delete(k)));
-      } catch (e) {
-        console.warn("[ErrorBoundary] Cache purge error:", e);
-      }
-    }
-    window.location.reload();
-  };
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="error-fallback">
-          <h2>Something went wrong</h2>
-          <button onClick={this.handleReload}>Reload Page</button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-```
+### 5. Keep Core Visual Primitives in the Main Bundle
+- Do not split lightweight, universally-used visual libraries (like `lucide-react`, which is ~32kB) into separate asynchronous chunks (`icons-vendor`).
+- Reserve `manualChunks` exclusively for heavy, deferred dependencies (e.g. `jspdf`, `docx`, heavy chart libraries) that are not needed on the initial screen.
 
 ---
 
-## 5. Verification & Testing Checklist
-
-When auditing or validating an SPA deployment:
-
-| Check | Test Command / Action | Expected Result |
-| :--- | :--- | :--- |
-| **Asset 404 Response** | `curl -i https://app.example.com/assets/nonexistent.js` | HTTP `404 Not Found` (never `200 OK` or `text/html`) |
-| **CSS Preload Elimination** | Inspect generated `index.html` after build | Contains single `<link rel="stylesheet">`, zero dynamic CSS chunks |
-| **Service Worker Invalidation** | Inspect `caches.keys()` in DevTools | Old cache versions purged upon Service Worker `activate` |
-| **Initial Load Cleanliness** | Load site in a fresh incognito window | Homepage renders immediately with zero console errors or `ErrorBoundary` triggers |
-| **Bypass Necessity** | Reload page without `Ctrl + Shift + R` | Page renders cleanly; hard refresh is completely unnecessary |
+## 3. Verification & Validation
+- **Deployment Verification:** Deploy a new build, keep an old browser tab open, and click a link to a lazy-loaded route. Assert the page automatically reloads seamlessly without throwing unhandled exceptions.
+- **Cache-Control Audit:** Inspect HTTP response headers via `curl -I https://app.example.com/index.html`. Verify `Cache-Control: max-age=0, must-revalidate` is returned.
+- **Asset 404 Audit:** Inspect `curl -I https://app.example.com/assets/nonexistent-hash.js`. Verify it returns HTTP 404 (NOT 200 with HTML text).
