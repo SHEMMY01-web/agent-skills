@@ -1,6 +1,6 @@
 # 🧠 Agent Skills
 
-A curated repository of 22 production-grade, enterprise-ready **Agent Skills** designed for AI coding assistants and autonomous agents (including Google Antigravity, Gemini CLI, Claude Code, and Agentic IDEs).
+A curated repository of 23 production-grade, enterprise-ready **Agent Skills** designed for AI coding assistants and autonomous agents (including Google Antigravity, Gemini CLI, Claude Code, and Agentic IDEs).
 
 Agent skills act as modular on-demand runbooks and domain knowledge packs. They equip agents with battle-tested architectures, best practices, security guardrails, and design systems without bloating prompt context windows.
 
@@ -63,6 +63,7 @@ flowchart TD
 | [`cloud-keepalive-resilience`](./skills/cloud-keepalive-resilience/SKILL.md) | Enterprise-grade keep-alive, database warming, and cold-start absorption patterns for free-tier and serverless cloud services (Render, Supabase, Fly.io, Vercel, Railway, Neon). Includes automated cron workflows and ping scripts. | [skills/cloud-keepalive-resilience](./skills/cloud-keepalive-resilience/) |
 | [`security-audit-hardening`](./skills/security-audit-hardening/SKILL.md) | Enterprise application security hardening, Content Security Policy (CSP), magic-byte file signature validation, rate limiting, and zero-trust sanitization. | [skills/security-audit-hardening](./skills/security-audit-hardening/) |
 | [`pwa-offline-resilience`](./skills/pwa-offline-resilience/SKILL.md) | Progressive Web App (PWA) service worker caching architecture, multi-tier cache partitioning, mutation bypass safety, network timeout race wrappers, and offline synchronization. | [skills/pwa-offline-resilience](./skills/pwa-offline-resilience/) |
+| [`spa-deployment-cache-resilience`](./skills/spa-deployment-cache-resilience/SKILL.md) | Single Page Application (SPA) deployment cache resilience, dynamic chunk preload failure recovery, Service Worker HTML cache-poisoning prevention, and negative-lookahead SPA routing for Vite, React Router, Vercel, and PWA environments. | [skills/spa-deployment-cache-resilience](./skills/spa-deployment-cache-resilience/) |
 
 ### 🗄️ Database, Concurrency & Storage Integrity
 
